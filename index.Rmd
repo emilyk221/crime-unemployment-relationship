@@ -1,0 +1,318 @@
+---
+title: "Relationship Between Crime and Unemployment in the United States"
+author: "Emily Kruse"
+date: "2025-04-19"
+output:
+  bookdown::html_document2:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data
+
+For this analysis, I used three different data sets. The first data set (US unemployment rates) contains unemployment rates, at both the county and state levels, for states in the U.S. and for years 2007 - 2015. A similar data set to this one can be found on kaggle. The second data set (US murder rates) contains crime rates by state for states in the U.S. and includes the years 1987 - 2020. A similar data set to this one can also be found on kaggle. The final data set (US population and crime rates) contains crime rates and population data by state for states in the U.S. for years 2001 - 2016. Again, a similar data set to this one can be found on kaggle. I also used a geometric shape file of the United States in order to create a spatial map of the U.S. with unemployment and crime rates. Similar shapefiles can be found online from the United States Census Bureau. Table \@ref(tab:datatab) shows the data sets I used and where to find them.
+
+### Load required libraries
+
+```{r libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(knitr)
+library(raster)
+library(sf)
+library(ggspatial)
+library(ggnewscale)
+library(ggsn)
+library(shiny)
+library(plotly)
+library(gridExtra)
+```
+
+### Create a table listing the data and its sources
+
+```{r datatab}
+# create vectors for a data sources table
+titles <- c("US Unemployment Rates", "US Murder Rates", "US Population and Crime Rates", "Spatial Map")
+sources <- c("Kaggle", "Kaggle", "Kaggle", "US Census Bureau")
+links <- c("https://www.kaggle.com/datasets/jayrav13/unemployment-by-county-us", "https://www.kaggle.com/datasets/robstepanyan/murder-rates-by-states", "https://www.kaggle.com/datasets/christophercorrea/prisoners-and-crime-in-united-states", "https://www.census.gov/geographies/mapping-files/time-series/geo/carto-boundary-file.html")
+
+# create data frame from vectors
+data_df <- data.frame(Dataset=titles, Source=sources, Website=links)
+# create and display a table listing data and its sources
+data_tab <- kable(data_df,caption="Data Sources")
+data_tab
+```
+
+## Objectives
+
+In this project, I wanted to explore the relationship between unemployment rates and crime rates. Historically, many studies conclude that these two variables are related, some claim a positive relationship and others claim a negative relationship [1]. Some theories to explain these disparate findings include that different types of crimes (i.e. violent vs. non-violent) have different relationships with unemployment [1] and that the unemployment rate is negatively correlated with the crime rate but that the change in unemployment rate is positively correlated with the crime rate [2]. It is important to understand the relational as well as the causal and motivational elements in these relationships so that an effective allocation of resources can be proposed for the reduction of crime rates. In order to visualize how the unemployment and crime rates change over time we will use a time series plot. We will also plot the unemployment and crime rates on a geospatial map of the U.S. and apply a color scale for the rates in order to visualize which areas/states have the highest and lowest rates. Finally, we will plot a scatter plot with the unemployment rate and the crime rate in order to view the relationship between these two variables. I predict that there will be a positive correlation between unemployment rates and crime rates.
+
+## Data Processing
+
+In order to explore the relationship between unemployment and crime rates, I combined the data sets into one data set with all the information I needed for the analysis. First, I did not choose to use the U.S. murder rates data set since this data was also in the U.S. population and crime rates data set. After loading the libraries I needed, I loaded the U.S. unemployment rates and the U.S. population and crime rates data sets as well as the shape file. To process the shape file, I removed the states and territories outside the contiguous United States in order to maintain consistency with the other data sets. For the U.S. unemployment rates data set, I filtered out the states Alaska and Hawaii and I consolidated the data from the county level to the state level. This is done by summing the population numbers and averaging the county crime rates to get the rate at the state level. To process the U.S. population and crime rates data set, I changed the state name to the state abbreviation to match the other data sets and added a column with the calculated crime rate from the number of crimes and the population, as well as filtered rows to contain only the states in the contiguous U.S. For both data sets I renamed columns to match each other and filtered the years to only the ones in common across all data sets. I then joined the data and saved the newly created combined data set to analyze.
+
+### Read datasets into R
+
+```{r data, message=FALSE, results=FALSE}
+# set working directory
+setwd("C:/Users/emily/OneDrive/Desktop/Ball State MSDS/DSCI 605/Final Project")
+
+# load unemployment and crime rates datasets
+Unemployrate <- read_csv("crime_data/unemployment_county.csv")
+Crimerate <- read_csv("crime_data/crime_and_incarceration_by_state.csv")
+# load shapefile for US states
+States <- st_read("crime_data/tl_2019_us_state/tl_2019_us_state.shp")
+```
+
+### Process US polygon shapefile
+
+```{r states}
+# filter out states/regions outside of contiguous US
+contiguous_states <- States %>%
+  filter(STUSPS != "AK" &
+           STUSPS != "AS" &
+           STUSPS != "MP" &
+           STUSPS != "PR" &
+           STUSPS != "VI" &
+           STUSPS != "HI" &
+           STUSPS != "GU")
+
+# check that length of contiguous_states is 49 (includes DC)
+length(unique(contiguous_states$STUSPS))
+```
+
+### Process Unemployment Rate data
+
+```{r unemployrate, message=FALSE}
+# check the number of unique states in unemployment data
+length(unique(Unemployrate$State))
+
+# consolidate unemployment rates by state
+Unemployrate <- Unemployrate %>%
+  # filter out states outside of contiguous US
+  filter(State != "AK" & State != "HI") %>%
+  # group data by state then year
+  group_by(State, Year) %>%
+  # consolidate data at county level to state level, summing population data and averaging rates
+  summarize(Totalforce=sum(`Labor Force`),
+            Totalemployed=sum(Employed),
+            Totalunemployed=sum(Unemployed),
+            Meanrate=mean(`Unemployment Rate`, rm.na=TRUE))
+
+# check the number of unique states again (should be 48)
+length(unique(Unemployrate$State))
+
+# prepare unemployment dataset for join
+Unemployrate <- Unemployrate %>%
+  # rename State column to STUSPS
+  rename("STUSPS"="State") %>%
+  # filter to include years 2007 to 2014
+  filter(Year %in% c(2007:2014))
+```
+
+### Process Crime Rate data
+
+```{r crimerate}
+# check the number of states in crime data
+length(unique(Crimerate$jurisdiction))
+
+# filter out states outside of contiguous US and rename columns
+Crimerate <- Crimerate %>%
+  #rename columns to match other data sets for future join
+  rename("STUSPS"="jurisdiction") %>%
+  rename("Year"="year") %>%
+  # filter out unwanted states and years
+  filter(STUSPS != "FEDERAL" & STUSPS != "ALASKA" & STUSPS != "HAWAII") %>%
+  filter(Year %in% c(2007:2014))
+  
+# check number of states again (should be 48)
+length(unique(Crimerate$STUSPS))
+
+# change state names to state abbreviations to match other data set
+Crimerate$STUSPS <- state.abb[match(str_to_title(Crimerate$STUSPS), state.name)]
+
+# add column with calculated crime rate
+Crimerate <- Crimerate %>%
+  mutate(crime_rate=(violent_crime_total/state_population)*100) %>%
+  dplyr::mutate_if(is.numeric, round, 1)
+```
+
+### Join relational tables
+
+```{r joins, warning=FALSE}
+# join states and unemployment rates tables with STUSPS as common column
+CS_Unemployrate <- right_join(contiguous_states, Unemployrate, by=c("STUSPS"))
+
+# join newly joined table with Crimerate table
+CS_Unemployrate_Crimerate <- right_join(CS_Unemployrate, Crimerate, by=c("STUSPS","Year"))
+
+# select and name columns for newly combined data set
+Combined_data <- CS_Unemployrate_Crimerate %>%
+  select(REGION, STUSPS, NAME, Year, Meanrate, crime_rate) %>%
+  rename("Unemployrate"="Meanrate")
+```
+
+### Check for missing values and save the final combined data
+
+```{r save}
+# check for missing values
+which(is.na(Combined_data$REGION))
+
+# save final combined data as rds file
+saveRDS(Combined_data, file = "Combined_data.Rds")
+```
+
+## Data Visualization
+
+For an exploratory data analysis of our newly combined data, I first looked at the mean, median, and the minimum and maximum values of both the unemployment rate and the crime rate. The minimum unemployment rate is 2.874 and the maximum is 14.116, giving a range of 11.242. The mean and the median are both around 7.3. The minimum and maximum crime rates are 0.10 and 0.80, respectively, with a range of 0.70. The median crime rate is 0.30 and the mean crime rate is 0.3693. Table \@ref(tab:data2) shows these basic statistics for unemployment and crime rates from the data. Figure \@ref(fig:plot1) shows a geospatial map of the contiguous U.S. with the fill color representing the unemployment rates for the year 2014 for each state. This map showed that North Dakota and Nebraska had the lowest unemployment rates in 2014 and California, Arizona, and Mississippi had the highest unemployment rates that year. A second geospatial map of the U.S. showing the crime rates for each state for the year 2014 is shown in figure \@ref(fig:plot2). This map showed that Maine and Vermont had the lowest crime rates in 2014 and Nevada, New Mexico, and Tennesee had the highest crime rates in 2014. From the geospatial maps, we can determine that the few states with the highest unemployment rates in 2014 did not have the highest crime rates that year and the few states with the lowest unemployment rates did not have the lowest crime rates that year. In addition, figures \@ref(fig:plot3) and \@ref(fig:plot4) show the same unemployment and crime data for just Region 1 of the U.S. Looking at the different regions, each of the four regions of the United States reflect the data from the country as a whole. No one region has a higher or lower unemployment or crime rate than the entire country but each region contains states with varying levels of unemployment and crime rates for the year 2014. Figure \@ref(fig:plot5) shows a time series plot to show the unemployment rates from 2007 to 2014. Many states show the same pattern of the unemployment rate increasing from 2007 to 2009/2010 and then decreasing from 2010 to 2014. Figure \@ref(fig:plot6), a time series plot showing the crime rates over the same years, did not show the same pattern over the years as the unemployment rate. Some states showed a consistent crime rate over these years and other states showed fluctuations in the crime rate during these years. Finally, figure \@ref(fig:plot7) shows a scatter plot of the crime rate vs. the unemployment rate in each state for the year 2014. This plot showed a weak positive correlation between these variables. For some states, the unemployment rate is high (or low) and the crime rate is also high (or low). However, for other states, there is a wide range of values for the unemployment rate while the crime rate is close to the mean crime rate for the country.
+
+
+### Read new combined dataset into R
+
+```{r data2}
+# load combined data set
+data <- readRDS("Combined_data.rds")
+
+# add table for basic data statistics for the basic variables of interest
+# save summary of data statistics for only unemployemnt rate and crime rate
+data_vars <- data %>%
+  select(Unemployrate, crime_rate) %>%
+  st_drop_geometry(data_vars)
+data_sum <- summary(data_vars)
+
+# create a kable from the summary stats
+stats_tab <- kable(data_sum, caption="Statistics for the numerical variables of interest")
+stats_tab
+```
+
+### Spatial map over Contiguous USA
+
+```{r plot1, fig.cap="A spatial map of US Unemployment Rate for year 2014"}
+# subset data for only year 2014
+data_2014 <- data %>%
+  filter(Year == 2014)
+
+# create color vector that is also easy to read in grayscale
+col = colorspace::sequential_hcl(palette="Blues 3", n=10)
+
+# plot spatial map of US unemployment rate
+ggplot(data=data_2014) +
+  geom_sf(aes(fill=as.factor(round(Unemployrate)))) +
+  # scale_color_discrete_sequential(palette = "Oslo", nmax = 8, order = 2:8) +
+  scale_fill_manual(values=col) +
+  guides(fill=guide_legend(title="Year 2014-Unemployment Rate")) +
+  new_scale_fill() +
+  geom_sf(linewidth=0.4, alpha=0, aes(color="B"), show.legend = FALSE) +
+  scale_color_manual(values = c("A"="white", "B"="black")) +
+  xlab("Longitude") + ylab("Latitude") +
+  ggtitle("Unemployment Rate Map over Contiguous USA") +
+  scalebar(data=data_2014, location="bottomleft", dist=1000, dist_unit="km", transform=TRUE, st.dist=0.04) +
+  annotation_north_arrow(location="br", which_north="true", style=north_arrow_fancy_orienteering)
+```
+
+```{r plot2, fig.cap="A spatial map of US Crime Rate for year 2014"}
+# plot spatial map of USA crime rate
+ggplot(data=data_2014) +
+  geom_sf(aes(fill=as.factor(crime_rate))) +
+  scale_fill_manual(values=col) +
+  guides(fill=guide_legend(title="Year 2014-Crime Rate")) +
+  new_scale_fill() +
+  geom_sf(linewidth=0.4, alpha=0, aes(color="B"), show.legend = FALSE) +
+  scale_color_manual(values = c("A"="white", "B"="black")) +
+  xlab("Longitude") + ylab("Latitude") +
+  ggtitle("Crime Rate Map over Contiguous USA") +
+  scalebar(data=data_2014, location="bottomleft", dist=1000, dist_unit="km", transform=TRUE, st.dist=0.04) +
+  annotation_north_arrow(location="br", which_north="true", style=north_arrow_fancy_orienteering)
+```
+
+### Spatial map over Region 1 of USA
+
+```{r plot3, fig.cap="A spatial map of Region 1 of US Unemployment Rate for year 2014"}
+# subset data for region 1
+data_region1 <- data_2014 %>%
+  filter(REGION == 1)
+
+# plot spatial map of unemployment rate in region 1 of USA
+ggplot(data=data_region1) +
+  geom_sf(aes(fill=as.factor(round(Unemployrate)))) +
+  scale_fill_manual(values=col) +
+  guides(fill=guide_legend(title="Region 1-Unemployment Rate")) +
+  new_scale_fill() +
+  geom_sf(linewidth=0.4, alpha=0, aes(color="B"), show.legend = FALSE) +
+  scale_color_manual(values = c("A"="white", "B"="black")) +
+  xlab("Longitude") + ylab("Latitude") +
+  ggtitle("Region 1 Unemployment Rate Map") +
+  scalebar(data=data_region1, location="bottomleft", dist=200, dist_unit="km", transform=TRUE, st.dist=0.04) +
+  annotation_north_arrow(location="br", which_north="true", style=north_arrow_fancy_orienteering)
+```
+
+```{r plot4, fig.cap="A spatial map of Region 1 of US Crime Rate for year 2014"}
+# plot spatial map of crime rate in region 1 of USA
+ggplot(data=data_region1) +
+  geom_sf(aes(fill=as.factor(crime_rate))) +
+  scale_fill_manual(values=col) +
+  guides(fill=guide_legend(title="Region 1-Crime Rate")) +
+  new_scale_fill() +
+  geom_sf(linewidth=0.4, alpha=0, aes(color="B"), show.legend = FALSE) +
+  scale_color_manual(values = c("A"="white", "B"="black")) +
+  xlab("Longitude") + ylab("Latitude") +
+  ggtitle("Region 1 Crime Rate Map") +
+  scalebar(data=data_region1, location="bottomleft", dist=200, dist_unit="km", transform=TRUE, st.dist=0.04) +
+  annotation_north_arrow(location="br", which_north="true", style=north_arrow_fancy_orienteering)
+```
+
+### Time Series Plot for Four States
+
+```{r plot5, fig.cap="A time series plot of unemployment rates for years 2007-2014"}
+# create time series plot of unemployment rate over the years
+plot_ly(data, x = ~Year, y = ~Unemployrate, color = ~NAME) %>%
+  filter(STUSPS %in% c("CA","ID","IL","IN")) %>%
+  add_lines() %>%
+  layout(title="Unemployment Rate Changes along with Years",
+         xaxis=list(title="Year"),
+         yaxis=list(title="Unemployment Rate")) %>%
+  layout(showlegend = TRUE)
+```
+
+```{r plot6, fig.cap="A time series plot of US crime rates for years 2007-2014"}
+# create time series plot of crime rate over the years
+plot_ly(data, x = ~Year, y = ~crime_rate, color = ~NAME) %>%
+  filter(STUSPS %in% c("IN","ME","TN","FL")) %>%
+  add_lines() %>%
+  layout(title="Crime Rate Changes along with Years",
+         xaxis=list(title="Year"),
+         yaxis=list(title="Crime Rate")) %>%
+  layout(showlegend = TRUE)
+```
+
+### Scatter plot of Unemployment and Crime Rates in 2014
+
+```{r plot7, fig.cap="A scatterplot of US Unemployment Rate vs. Crime Rate for year 2014"}
+# create scatterplot
+plot_ly(data, x = ~crime_rate, y = ~Unemployrate, color=~REGION) %>%
+  filter(Year %in% 2014) %>%
+  add_markers() %>%
+  group_by(REGION) %>%
+  layout(title="Unemployment Rate and Crime Rate in 2014",
+         xaxis=list(title = "CrimeRate per 100 people"),
+         yaxis=list(title = "UnemploymentRate per 100 people")) %>%
+  layout(showlegend = TRUE, legend = list(title = list(text = "Region")))
+
+```
+
+## Discussion and Conclusion
+
+While exploring the relationship between unemployment rates and crime rates, we determined that there is a weak positive correlation between unemployment rates and crime rates. The scatterplot (Figure \@ref(fig:plot7)) shows a positive correlation but this pattern is harder to see in the time series plots (Figures \@ref(fig:plot5) and \@ref(fig:plot6)) and the spatial maps (Figures \@ref(fig:plot1) and \@ref(fig:plot2)). A weak correlation between unemployment rates and crime rates means that these variables are related, however, there are other factors involved. Public policy, weather, urbanization, and access to illegal substances and weapons can be factors that influence crime rates and can vary by state [3-5]. Other possible contributing factors that make an individual more likely to commit a crime include poverty, mental illness, family/peer/community influences, personality traits, and stress [3]. Another factor that could influence the correlation between unemployment and crime rates could be type of crime [1]. For example, perhaps when the unemployment rate increases, people are more likely to commit non-violent crimes such as theft but some states could have steeper consequences for crimes and/or economic relief programs that mitigate the number of crimes committed. Further investigation is warranted, particularly to compare summary data for each region of the United States to determine if there are differences between regions. Additionally, different types of crimes can be extracted to see if there is a particular type of crime that is more positively correlated with unemployment rates than other types of crime. Another thing we could look into is how the distribution of unemployment and crime rates change over time. Are there years when there is a wider spread of rates or years when there are fewer states near the mean rates and more states with higher and lower rates? In conclusion, the correlating and causal factors influencing crime rates include unemployment rates in addition to a myriad of other social, psychological, and judicial elements.
+
+
+## References
+
+1. Jawadi F, Mallick S, Cheffou A, Augustine A (2021) Does higher unemployment lead to greater criminality? Revisiting the debate over the business cycle. 182:448-471. https://www.sciencedirect.com/science/article/abs/pii/S0167268119301027
+2. Melick M (2003) The relationship between crime and unemployment. 11:30-36. https://digitalcommons.iwu.edu/cgi/viewcontent.cgi?article=1069&context=parkplace
+3. ayoubchaaba12@gmail.com (2024) Social and Psychological Factors in Crime: A Criminological Perspective. https://www.crimpsy.com/social-and-psychological-factors-in-crime-a-criminological-perspective/
+4. The Concept of Crime Rate: Significance and Factors Influencing It. (2024) Sociology of Crime & Deviance. https://easysociology.com/sociology-of-crime-deviance/the-concept-of-crime-rate-significance-and-factors-influencing-it/
+5. Criminal Justice DrugFacts. (2020) National Institute on Drug Abuse; National Institutes of Health; U.S. Department of Health and Human Services. https://nida.nih.gov/publications/drugfacts/criminal-justice
+
+
